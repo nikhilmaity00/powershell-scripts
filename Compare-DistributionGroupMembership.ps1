@@ -208,4 +208,4 @@ finally {
     }
 }
 
-Write-Host "`nIt's Done." -ForegroundColor Cyan
+Write-Host "`nDone." -ForegroundColor Cyan

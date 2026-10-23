@@ -58,7 +58,7 @@ Write-Host "     Excel Workbook: $ExcelPath                         " -Foregroun
 Write-Host "     Scope:          ALL Enabled + Disabled Mailboxes   " -ForegroundColor Cyan
 Write-Host "========================================================`n" -ForegroundColor Cyan
 
-# 3. Friendly License SKU Mapping
+# 4. Friendly License SKU Mapping
 $FriendlySkuNames = @{
     "ENTERPRISEPACK"           = "Office 365 E3"
     "ENTERPRISEPREMIUM"        = "Office 365 E5"
@@ -88,22 +88,22 @@ function Convert-SizeToGB ([string]$sizeString) {
 }
 
 try {
-    # 4. Connect to Exchange Online via Device Code
+    # 5. Connect to Exchange Online via Device Code
     Write-Host "[1/3] Connecting to Exchange Online via Device Code..." -ForegroundColor Yellow
     Write-Host ">>> COPY THE URL AND CODE BELOW AND PASTE INTO YOUR BROWSER <<<`n" -ForegroundColor Green
     Connect-ExchangeOnline -Device -Organization $TenantIdOrDomain -ShowBanner:$false -ErrorAction Stop
     Write-Host "`n[+] Exchange Online connected.`n" -ForegroundColor Green
 
-    # 5. Connect to Microsoft Graph via Device Code (Read-Only)
+    # 6. Connect to Microsoft Graph via Device Code (Read-Only)
     Write-Host "[2/3] Connecting to Microsoft Graph via Device Code (Read-Only)..." -ForegroundColor Yellow
     Write-Host ">>> COPY THE URL AND CODE BELOW AND PASTE INTO YOUR BROWSER <<<`n" -ForegroundColor Green
     Connect-MgGraph -TenantId $TenantIdOrDomain -Scopes "User.Read.All", "Organization.Read.All" -UseDeviceAuthentication -NoWelcome -ErrorAction Stop
     Write-Host "`n[+] Microsoft Graph connected.`n" -ForegroundColor Green
 
-    # 6. Build License Lookup Table
-    Write-Host "[3/3] Querying tenant data and building report..." -ForegroundColor Yellow
-    Write-Host "Fetching Subscribed SKUs..." -ForegroundColor Gray
-    $SubscribedSkus = Get-MgSubscribedSku -All
+    # 7. Build License Lookup Table (Minimal Attribute Projection)
+    Write-Host "[3/3] Querying tenant data using least-data exposure..." -ForegroundColor Yellow
+    Write-Host "Fetching Subscribed SKUs for license name resolution..." -ForegroundColor Gray
+    $SubscribedSkus = Get-MgSubscribedSku -All -ErrorAction Stop
     $SkuMap = @{}
     foreach ($sku in $SubscribedSkus) {
         $friendly = if ($FriendlySkuNames.ContainsKey($sku.SkuPartNumber)) { 
@@ -113,9 +113,40 @@ try {
         }
         $SkuMap[$sku.SkuId] = $friendly
     }
+    # Clear raw SKUs reference
+    $SubscribedSkus = $null
 
-    # 7. Fetch ALL Active Mailboxes (UserMailbox and SharedMailbox, both Enabled & Disabled)
-    Write-Host "Fetching ALL User and Shared Mailboxes (Enabled & Disabled)..." -ForegroundColor Gray
+    Write-Host "Fetching user license allocations (minimal attribute projection: UPN, Licenses, AccountEnabled)..." -ForegroundColor Gray
+    # Query strictly the 3 required attributes to avoid pulling full user profiles into memory
+    $rawGraphUsers = Get-MgUser -All -Property @("UserPrincipalName", "AssignedLicenses", "AccountEnabled") -ErrorAction SilentlyContinue
+
+    # Build lean in-memory lookup table storing ONLY non-sensitive mapped strings
+    $UserLicenseMap = @{}
+    if ($rawGraphUsers) {
+        foreach ($u in $rawGraphUsers) {
+            if ([string]::IsNullOrWhiteSpace($u.UserPrincipalName)) { continue }
+            
+            $lics = [System.Collections.Generic.List[string]]::new()
+            if ($u.AssignedLicenses) {
+                foreach ($lic in $u.AssignedLicenses) {
+                    if ($SkuMap.ContainsKey($lic.SkuId)) {
+                        $lics.Add($SkuMap[$lic.SkuId])
+                    }
+                }
+            }
+            $licText = if ($lics.Count -gt 0) { ($lics -join "; ") } else { "None / Unlicensed" }
+
+            $UserLicenseMap[$u.UserPrincipalName.ToLower()] = @{
+                AccountEnabled = $u.AccountEnabled
+                Licenses       = $licText
+            }
+        }
+    }
+    # Immediately deallocate raw Graph user profile objects to protect memory
+    $rawGraphUsers = $null
+
+    # 8. Fetch ALL Active Mailboxes (UserMailbox and SharedMailbox, both Enabled & Disabled)
+    Write-Host "Fetching Mailboxes (Restricted to Minimum & Quota property sets)..." -ForegroundColor Gray
     $Mailboxes = [System.Collections.Generic.List[object]]::new()
     
     $activeMbx = Get-EXOMailbox -ResultSize Unlimited -PropertySets Minimum,Quota `
@@ -127,6 +158,7 @@ try {
             $Mailboxes.Add($mbxItem)
         }
     }
+    $activeMbx = $null
 
     # Optionally fetch Inactive Mailboxes (mailboxes under retention/litigation hold whose users were deleted)
     if ($IncludeInactiveMailboxes) {
@@ -141,6 +173,7 @@ try {
                 $Mailboxes.Add($inItem)
             }
         }
+        $inactiveMbx = $null
     }
 
     $TenantResults = [System.Collections.Generic.List[object]]::new()
@@ -152,7 +185,7 @@ try {
     $sharedCount = 0
     $inactiveCount = 0
 
-    Write-Host "Total mailboxes to process: $total. Fetching storage and license metrics..." -ForegroundColor Gray
+    Write-Host "Total mailboxes to process: $total. Parsing storage and license metrics locally..." -ForegroundColor Gray
 
     foreach ($mbx in $Mailboxes) {
         $counter++
@@ -160,6 +193,7 @@ try {
 
         $isInactive = ($mbx.RecipientTypeDetails -eq "InactiveMailbox")
         $isShared = ($mbx.RecipientTypeDetails -eq "SharedMailbox")
+        $upnKey = if ($mbx.UserPrincipalName) { $mbx.UserPrincipalName.ToLower() } else { "" }
 
         # Determine Account Status
         $accountStatus = "Enabled"
@@ -173,16 +207,27 @@ try {
             $sharedCount++
         }
         else {
-            if ($mbx.AccountDisabled -eq $true) {
+            # Correlate with cached Graph account state if available, else fallback to EXO AccountDisabled
+            if ($UserLicenseMap.ContainsKey($upnKey) -and $UserLicenseMap[$upnKey].AccountEnabled -ne $null) {
+                if ($UserLicenseMap[$upnKey].AccountEnabled) {
+                    $accountStatus = "Enabled"
+                    $enabledCount++
+                } else {
+                    $accountStatus = "Disabled"
+                    $disabledCount++
+                }
+            }
+            elseif ($mbx.AccountDisabled -eq $true) {
                 $accountStatus = "Disabled"
                 $disabledCount++
-            } else {
+            }
+            else {
                 $accountStatus = "Enabled"
                 $enabledCount++
             }
         }
 
-        # Strictly Read-Only Statistics
+        # Strictly Read-Only Statistics (Folder/Item content is NEVER queried)
         $stats = Get-EXOMailboxStatistics -Identity $mbx.UserPrincipalName -ErrorAction SilentlyContinue
 
         # Calculate Used Space
@@ -205,26 +250,11 @@ try {
             $percentUsed = [math]::Round(($usedGB / $allocatedGB) * 100, 1)
         }
 
-        # License Lookup via Graph
-        $licenseList = @()
-        if (-not $isInactive) {
-            $mgUser = Get-MgUser -UserId $mbx.UserPrincipalName -Property AssignedLicenses,AccountEnabled -ErrorAction SilentlyContinue
-            if ($mgUser) {
-                # Double-check account enabled status with Graph if available
-                if (-not $isShared -and $mgUser.AccountEnabled -ne $null) {
-                    $accountStatus = if ($mgUser.AccountEnabled) { "Enabled" } else { "Disabled" }
-                }
-
-                if ($mgUser.AssignedLicenses) {
-                    foreach ($lic in $mgUser.AssignedLicenses) {
-                        if ($SkuMap.ContainsKey($lic.SkuId)) {
-                            $licenseList += $SkuMap[$lic.SkuId]
-                        }
-                    }
-                }
-            }
+        # In-Memory License Lookup (Instant local match, zero additional network calls)
+        $licenseString = "None / Unlicensed"
+        if (-not $isInactive -and $UserLicenseMap.ContainsKey($upnKey)) {
+            $licenseString = $UserLicenseMap[$upnKey].Licenses
         }
-        $licenseString = if ($licenseList.Count -gt 0) { $licenseList -join "; " } else { "None / Unlicensed" }
 
         $record = [PSCustomObject]@{
             Tenant              = $TenantIdOrDomain
@@ -242,7 +272,7 @@ try {
         $TenantResults.Add($record)
     }
 
-    # 8. Export Tab to Excel Workbook (Appends or updates the tab without overwriting other tabs)
+    # 9. Export Tab to Excel Workbook (Appends or updates the tab without overwriting other tabs)
     Write-Host "`nExporting $total records to worksheet tab [$SheetName] in $ExcelPath ..." -ForegroundColor Green
     
     $TenantResults | Export-Excel -Path $ExcelPath `
@@ -253,7 +283,7 @@ try {
         -BoldTopRow `
         -FreezeTopRow
 
-    # 9. Summary Statistics Display
+    # 10. Summary Statistics Display
     Write-Host "`n========================================================" -ForegroundColor Cyan
     Write-Host "                TENANT AUDIT SUMMARY                    " -ForegroundColor Cyan
     Write-Host "========================================================" -ForegroundColor Cyan
@@ -266,6 +296,7 @@ try {
     }
     Write-Host ("{0,-28} : {1}" -f "Output Excel File", $ExcelPath) -ForegroundColor Green
     Write-Host ("{0,-28} : {1}" -f "Worksheet Sheet Name", $SheetName) -ForegroundColor Green
+    Write-Host ("{0,-28} : {1}" -f "Data Privacy / Caching", "Purged (Zero Sensitive Data Cached)") -ForegroundColor Cyan
     Write-Host "========================================================`n" -ForegroundColor Cyan
 }
 catch {
@@ -273,7 +304,27 @@ catch {
     Write-Error $_
 }
 finally {
-    # Clean disconnect of sessions
+    # ---------------------------------------------------------------------
+    # Security & Privacy: Purge in-memory collections and disconnect sessions
+    # ---------------------------------------------------------------------
+    Write-Host "Cleaning session context and purging sensitive data from memory..." -ForegroundColor Gray
+    
+    # 1. Clear In-Memory Dictionaries and Collections
+    if ($UserLicenseMap) { $UserLicenseMap.Clear(); $UserLicenseMap = $null }
+    if ($SkuMap)         { $SkuMap.Clear(); $SkuMap = $null }
+    if ($Mailboxes)      { $Mailboxes.Clear(); $Mailboxes = $null }
+    if ($TenantResults)  { $TenantResults.Clear(); $TenantResults = $null }
+
+    # 2. Clear Graph Context & Auth Token Cache
+    try {
+        Clear-MgContext -ErrorAction SilentlyContinue
+    } catch {}
+
+    # 3. Disconnect Exchange Online and Microsoft Graph
     Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
     Disconnect-MgGraph -ErrorAction SilentlyContinue
+
+    # 4. Trigger Immediate Garbage Collection to free memory heap
+    [System.GC]::Collect()
+    [System.GC]::WaitForPendingFinalizers()
 }

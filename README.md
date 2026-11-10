@@ -1,56 +1,41 @@
-# Executive Exchange Online Group & Distribution List Report
+# PowerShell Scripts
 
-A streamlined PowerShell solution designed for higher management, security audits, and IT governance.
-
-It exports all:
-1. **Standard Distribution Lists & Mail Security Groups**
-2. **Microsoft 365 Groups (Teams & Unified Groups)**
-3. **Dynamic Distribution Groups**
-
-...into a **clean, decluttered, executive-ready Excel workbook (`.xlsx`)**.
+A collection of handy PowerShell automation and utility scripts for Microsoft 365, Exchange Online, SaaS platforms, and general IT administration.
 
 ---
 
-## What Makes It Management-Ready?
+## Available Scripts
 
-* **No Technical Clutter:** Stripped out GUIDs, LDAP filter code, internal PowerShell class names (`MailUniversalDistributionGroup`, `UserMailbox`), and empty attribute columns.
-* **Plain-English Business Terms:** Group and member types are translated to clear terminology:
-  * `Distribution List`, `Mail Security Group`, `Microsoft 365 Group`
-  * `Internal User`, `External Contact`, `Sub-Group`, `Guest User`
-  * `Direct` vs `Nested (via Sub-Group)`
-* **Master Group Directory:** One master inventory table containing every group, its member count, assigned owners, and security ingress status.
+### 1. `Export-TenantDistributionGroups.ps1`
+Exports all Distribution Lists, Mail-Enabled Security Groups, Microsoft 365 Groups, and Dynamic Distribution Groups into a clean, multi-tab Excel workbook (`.xlsx`).
 
----
+* **Features:**
+  * Interactive Device Code login (`https://microsoft.com/devicelogin`) for effortless multi-tenant switching.
+  * Detects and reuses active sessions; prompts to keep or close session on exit.
+  * Recursively resolves nested child groups.
+  * Formats clean management tabs: `Executive_Summary`, `Group_Directory`, `Distribution_Lists`, `Microsoft_365_Groups`, and `Dynamic_Groups`.
+* **Usage:**
+  ```powershell
+  # Full export
+  .\Export-TenantDistributionGroups.ps1
 
-## Excel Workbook Structure
-
-File: `M365_Group_and_DL_Report_<TenantName>_<Timestamp>.xlsx`
-
-| Tab Order | Sheet Name | Target Audience | What It Shows |
-| :---: | :--- | :--- | :--- |
-| **1** | **`Executive_Summary`** | C-Level / Leadership | High-level KPI metrics card (Total Email Groups Managed, DLs, M365 Groups, Dynamic Groups) |
-| **2** | **`Group_Directory`** | IT Management | Master catalog of all groups, types, member counts, assigned owners, and public email status |
-| **3** | **`Distribution_Lists`** | Operations / Helpdesk | Clean member roster for standard DLs (Group Name, Member Name, Email, Direct/Nested) |
-| **4** | **`Microsoft_365_Groups`** | Operations / Helpdesk | Clean member & owner roster for M365 Groups (Group Name, Privacy, Member, Role) |
-| **5** | **`Dynamic_Groups`** | Operations / Helpdesk | Evaluated recipients for dynamic groups |
+  # Dry-run test (preview on screen)
+  .\Export-TenantDistributionGroups.ps1 -DryRun
+  ```
 
 ---
 
-## How to Run
+### 2. `Sync-LicenseInventory.ps1`
+Synchronizes SaaS software licenses into an Excel tracker from multiple cloud vendor APIs (Microsoft Graph, Adobe Admin API, Zscaler, Barracuda, IAM Cloud, CloudPBX).
 
-```powershell
-cd C:\Users\NikhilMaity\projects\powershell-scripts
-.\Export-TenantDistributionGroups.ps1
-```
+* **Usage:**
+  ```powershell
+  .\Sync-LicenseInventory.ps1 -ExcelPath "C:\Path\To\Enterprise_Software_License_Tracker.xlsx"
+  ```
 
-### Dry Run (Preview on Screen)
-```powershell
-.\Export-TenantDistributionGroups.ps1 -DryRun
-```
-* Shows the Master Group Directory preview directly in the PowerShell console without writing files.
+---
 
-### Optional Switches
-* `-ExportCsv`: Also generates supplementary flat CSV files alongside the Excel workbook.
-* `-ReuseExistingConnection`: Reuses your existing session without prompting at startup.
-* `-KeepSessionConnected`: Leaves Exchange Online connected without prompting at the end.
-* `-SkipM365Groups` or `-SkipDynamicGroups`: Excludes those groups if not needed.
+## Requirements & Portability
+
+* PowerShell 5.1 or PowerShell 7+ on Windows.
+* Scripts are self-bootstrapping and automatically install any required modules (`ExchangeOnlineManagement`, `ImportExcel`) into the `CurrentUser` scope if missing.

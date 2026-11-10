@@ -1,0 +1,12 @@
+# Logs
+*.log
+
+# Exported Data & Reports
+*.csv
+*.xlsx
+*.xls
+
+# Temporary and OS files
+*.tmp
+Thumbs.db
+.DS_Store
